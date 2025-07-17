@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+
+# VSCode
+.vscode/
+
+# PyCharm
+.idea/
+
+# Arquivos de configuração e credenciais
+.env
+.env.*
+
+# Arquivos temporários/relatórios/exportações
+*.csv
+*.xlsx
+usuarios_inativos_para_desativar.*
+*.log
+*.tmp
+
+# Backup
+*~
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Test/output folders
+output/
+build/
+dist/
+*.egg-info/
+
+# Pastas para não versionar
+final/
+Final/
+testes/
+Testes/
+tests/
+Tests/
