@@ -20,7 +20,6 @@ Automação para análise, geração de relatórios e desativação de usuários
 1. Clone o repositório:
 ```bash
 git clone https://github.com/seu-usuario/sac-user-automation.git
-cd sac-user-automation
 ```
 2. Instale as dependências:
 ```bash
