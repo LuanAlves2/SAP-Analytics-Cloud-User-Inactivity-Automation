@@ -46,7 +46,7 @@ O sistema irá:
 - opcionalmente, desativar usuários via API SCIM.
 
 ## ✨ Funcionalidades
-- **Identificação de usuários inativos** com cálculo preciso de dias sem acesso;
+- **Identificação de usuários inativos** ;
 - **Exportação profissional** para planilhas Excel;
 - **Desativação automática** via API (com modo seguro);
 - **Proteção de usuários** por lista customizável;
@@ -58,12 +58,6 @@ O sistema irá:
 
 ## ⚙️ Configuração
 Nunca compartilhe seu `.env` publicamente. O arquivo já está no `.gitignore`.
-
-## 🤝 Contribuindo
-Contribuições são bem-vindas! Abra uma issue ou envie um pull request.
-
-## 📝 Licença
-Projeto sob a licença MIT. Consulte o arquivo LICENSE para detalhes.
 
 ## 💡 Aviso
 Use por sua conta e risco. Revise os relatórios antes de efetuar desativações em massa.
