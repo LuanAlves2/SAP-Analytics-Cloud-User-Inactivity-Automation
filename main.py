@@ -24,7 +24,13 @@ if COL_IS_DEACTIVATED in df_users.columns:
     df_users = df_users[df_users[COL_IS_DEACTIVATED].isna()]
 
 print(f"Lendo atividades de: {ATIVIDADE_CSV}")
-df_atividade = pd.read_csv(ATIVIDADE_CSV, skiprows=1)
+df_atividade = pd.read_csv(
+    ATIVIDADE_CSV,
+    skiprows=1,
+    on_bad_lines="skip",
+    dtype=str,
+    engine="python"
+)
 df_atividade.columns = [col.strip() for col in df_atividade.columns]
 print("\nColunas de atividade:", df_atividade.columns.tolist())
 if COL_OBJECT_TYPE not in df_atividade.columns:
