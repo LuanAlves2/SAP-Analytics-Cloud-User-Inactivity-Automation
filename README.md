@@ -35,7 +35,7 @@ CLIENT_SECRET=seu_client_secret
 1. Exporte os relatórios de Usuários e Atividades do SAC para sua pasta `Downloads`.
 2. Execute o script principal:
 ```bash
-python src/automacao_final.py
+python main.py
 ```
 
 O sistema irá:
