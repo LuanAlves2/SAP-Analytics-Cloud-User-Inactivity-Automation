@@ -33,24 +33,24 @@ Dependencias: `pandas`, `requests`, `python-dotenv`, `openpyxl`, `schedule`
 
 ### 3. Criar o arquivo `.env`
 
-Na raiz do projeto, crie um arquivo chamado `.env` com suas credenciais OAuth do SAC:
+Na raiz do projeto, crie um arquivo chamado `.env` com todas as configuracoes sensiveis:
 
 ```
 CLIENT_ID=seu_client_id_aqui
 CLIENT_SECRET=seu_client_secret_aqui
+OAUTH_TOKEN_URL=https://SEU_TENANT.authentication.br10.hana.ondemand.com/oauth/token/alias/SEU_TENANT.cf-br10
+TENANT_URL=https://SEU_TENANT.br10.hcs.cloud.sap
+EMAIL_SMTP_HOST=smtp.seuservidor.com.br
+EMAIL_SMTP_PORT=25
+EMAIL_FROM=bi@seuservidor.com.br
+EMAIL_DESTINATARIOS=email1@empresa.com,email2@empresa.com,email3@empresa.com
 ```
 
-> Essas credenciais sao obtidas no SAP BTP Cockpit, no service key do XSUAA vinculado ao SAC.
+> As credenciais OAuth sao obtidas no SAP BTP Cockpit, no service key do XSUAA vinculado ao SAC.
 
 ### 4. Configurar o `config.py`
 
-Abra o arquivo `config.py` e ajuste conforme necessario:
-
-**URLs do tenant** (altere para o seu tenant SAC):
-```python
-OAUTH_TOKEN_URL = "https://SEU_TENANT.authentication.br10.hana.ondemand.com/oauth/token/alias/SEU_TENANT.cf-br10"
-TENANT_URL = "https://SEU_TENANT.br10.hcs.cloud.sap"
-```
+Abra o arquivo `config.py` e ajuste:
 
 **Usuarios protegidos** (nunca serao desativados):
 ```python
@@ -67,17 +67,6 @@ DESATIVAR = False        # True = desativa usuarios via API / False = apenas ger
 DESATIVAR_APENAS_UM = False  # True = desativa apenas o primeiro (para teste)
 ```
 
-**Destinatarios do email**:
-```python
-EMAIL_SMTP_HOST = "smtp.seuservidor.com.br"
-EMAIL_SMTP_PORT = 25
-EMAIL_FROM = "bi@seuservidor.com.br"
-EMAIL_DESTINATARIOS = [
-    "seu.email@empresa.com",
-    # Adicione outros destinatarios aqui
-]
-```
-
 ### 5. Executar
 
 ```bash
@@ -91,13 +80,13 @@ python main.py
 1. **Autentica** no SAC via OAuth (client_credentials)
 2. **Extrai todos os usuarios** via SCIM API (`/api/v1/scim/Users`)
 3. **Extrai o log de atividades** via Activity Export API (`/api/v1/audit/activities/exportActivities`)
-4. **Identifica inativos** - usuarios sem acesso nos ultimos 30 dias
-5. **Aplica protecao** - remove da lista os usuarios definidos em `USERS_PROTEGIDOS`
+4. **Identifica inativos** — usuarios sem acesso nos ultimos 30 dias
+5. **Aplica protecao** — remove da lista os usuarios definidos em `USERS_PROTEGIDOS`
 6. **Gera relatorios**:
    - `usuarios_inativos_para_desativar.csv`
    - `usuarios_inativos_para_desativar.xlsx`
    - Ambos incluem: usuario, nome, email, ultimo acesso, dias sem acesso e empresa
-7. **Envia email** com resumo e relatorios em anexo
+7. **Envia email** com resumo visual (metricas, taxa de inatividade) e relatorios em anexo
 8. **Desativa usuarios** via API SCIM (se `DESATIVAR = True`)
 
 ---
@@ -105,19 +94,36 @@ python main.py
 ## Estrutura do projeto
 
 ```
-├── main.py                    # Script principal - orquestra todo o fluxo
+├── main.py                    # Script principal — orquestra todo o fluxo
 ├── service.py                 # Wrapper para rodar como servico Windows (NSSM)
-├── config.py                  # Configuracoes: URLs, credenciais, usuarios protegidos, email
-├── sac_utils.py               # Funcoes de integracao com as APIs do SAC (SCIM, CSRF, Activities)
+├── config.py                  # Configuracoes: usuarios protegidos, flags, colunas CSV
+├── sac_utils.py               # Integracao com as APIs do SAC (SCIM, CSRF, Activities)
 ├── export_utils.py            # Geracao do relatorio Excel
 ├── email_utils.py             # Envio de email com anexos via SMTP
 ├── requirements.txt           # Dependencias Python
 ├── agendar_tarefa.bat         # Agendamento via Windows Task Scheduler
 ├── instalar_servico_nssm.bat  # Instalacao como servico via NSSM
-├── .env                       # Credenciais OAuth (nao versionado)
+├── .env                       # Credenciais e configuracoes sensiveis (nao versionado)
 ├── testes/                    # Scripts de teste e validacao
 └── final/                     # Versoes anteriores do script
 ```
+
+---
+
+## Configuracao do `.env`
+
+Todas as configuracoes sensiveis ficam no `.env` (nao versionado no git):
+
+| Variavel | Descricao |
+|----------|-----------|
+| `CLIENT_ID` | Client ID do XSUAA (SAP BTP) |
+| `CLIENT_SECRET` | Client Secret do XSUAA |
+| `OAUTH_TOKEN_URL` | URL do endpoint OAuth do tenant |
+| `TENANT_URL` | URL base do tenant SAC |
+| `EMAIL_SMTP_HOST` | Servidor SMTP para envio de email |
+| `EMAIL_SMTP_PORT` | Porta do SMTP (padrao: 25) |
+| `EMAIL_FROM` | Email remetente |
+| `EMAIL_DESTINATARIOS` | Lista de destinatarios separados por virgula |
 
 ---
 
@@ -131,8 +137,9 @@ Instala como servico Windows usando o [NSSM](https://nssm.cc/). O servico fica r
 
 **Instalacao:**
 
-1. Baixe o NSSM em [nssm.cc/download](https://nssm.cc/download) e coloque o `nssm.exe` no PATH do sistema
-2. Clique com botao direito em `instalar_servico_nssm.bat` > **Executar como administrador**
+1. Baixe o NSSM em [nssm.cc/download](https://nssm.cc/download)
+2. Edite o `instalar_servico_nssm.bat` com os caminhos corretos do Python e do projeto no servidor
+3. Execute como administrador
 
 **Comandos uteis:**
 
@@ -144,6 +151,8 @@ nssm remove SAC_Usuarios_Inativos      # remover servico
 ```
 
 **Logs:** o servico grava logs em `service.log` na raiz do projeto (rotacao automatica em 5MB).
+
+**Nota para Python embeddable:** Se usar a versao embeddable do Python no servidor, edite o arquivo `python3XX._pth` e adicione o caminho completo do projeto para que os modulos sejam encontrados.
 
 ### Opcao 2: Windows Task Scheduler
 
@@ -164,12 +173,12 @@ schtasks /delete /tn "SAC_Usuarios_Inativos" /f
 ## Fluxo das APIs do SAC
 
 ```
-1. POST /oauth/token (client_credentials) --> access_token
-2. GET  /api/v1/scim/Users                --> lista de usuarios (paginado)
-3. GET  /api/v1/csrf                      --> CSRF token + cookies
-4. POST /api/v1/audit/activities/exportActivities --> log de atividades (paginado)
-5. GET  /api/v1/scim/Users/{id}           --> objeto do usuario (para desativacao)
-6. PUT  /api/v1/scim/Users/{id}           --> desativa usuario (active: false)
+1. POST /oauth/token (client_credentials)            --> access_token
+2. GET  /api/v1/scim/Users                           --> lista de usuarios (paginado)
+3. GET  /api/v1/csrf                                 --> CSRF token + cookies
+4. POST /api/v1/audit/activities/exportActivities     --> log de atividades (paginado)
+5. GET  /api/v1/scim/Users/{id}                      --> objeto do usuario (para desativacao)
+6. PUT  /api/v1/scim/Users/{id}                      --> desativa usuario (active: false)
 ```
 
 ---
