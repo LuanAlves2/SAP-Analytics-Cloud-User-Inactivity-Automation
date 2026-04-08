@@ -34,7 +34,7 @@ USERS_PROTEGIDOS = [
     # Adicione outros aqui
 ]
 
-DESATIVAR = False # Mudar para True para ativar a desativação
+DESATIVAR = True # Mudar para True para ativar a desativação
 DESATIVAR_APENAS_UM = False # True só para testar um
 
 # --- Configuracao de email ---

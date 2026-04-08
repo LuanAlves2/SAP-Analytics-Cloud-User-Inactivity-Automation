@@ -94,7 +94,6 @@ print("\nLista salva em usuarios_inativos_para_desativar.csv")
 
 exportar_inativos_para_xlsx(
     df_inativos=df_inactive_ok,
-    df_atividade=df_atividade_full,
     caminho_saida_xlsx="usuarios_inativos_para_desativar.xlsx"
 )
 
