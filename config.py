@@ -22,6 +22,7 @@ COL_OBJECT_TYPE = "Object Type"
 COL_TIMESTAMP = "Timestamp"
 
 USERS_PROTEGIDOS = [
+    "SAPSUPPORT",
     "LUANARANTES",
     "DIEGO_OLIVEIRA",
     "LUCASGUIMARAES",
@@ -31,6 +32,9 @@ USERS_PROTEGIDOS = [
     "BND_ANA_PAULA",
     "LUCIANO_BELLUZO",
     "HD_HENRIQUE_GONZAGA",
+    "ALFA_NELSON",
+    "HELDER_ADORNO",
+    "CAROLINA_LIMA"
     # Adicione outros aqui
 ]
 
