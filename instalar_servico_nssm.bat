@@ -1,7 +1,7 @@
 @echo off
 echo === Instalando servico SAC_Usuarios_Inativos via NSSM ===
 
-nssm install SAC_Usuarios_Inativos "C:\sistemas\python313\python.exe" "\"C:\sistemas\SAP-Analytics-Cloud-User-Inactivity-Automation\service.py\""
+nssm install SAC_Usuarios_Inativos "C:\Program Files\Python\python.exe" "\"C:\sistemas\SAP-Analytics-Cloud-User-Inactivity-Automation\service.py\""
 nssm set SAC_Usuarios_Inativos AppDirectory "C:\sistemas\SAP-Analytics-Cloud-User-Inactivity-Automation"
 nssm set SAC_Usuarios_Inativos DisplayName "SAC - Desativacao de Usuarios Inativos"
 nssm set SAC_Usuarios_Inativos Description "Executa toda sexta-feira as 10h a verificacao e desativacao de usuarios inativos no SAP Analytics Cloud"
