@@ -1,293 +1,234 @@
-import pandas as pd
 import os
+import socket
+import sys
+import traceback
 from datetime import datetime, timedelta
+
+import pandas as pd
+
 from config import *
 from sac_utils import (
-    get_token, get_csrf_token,
-    buscar_usuario_por_email, desativar_usuario,
+    get_token, get_csrf_token, desativar_usuario,
     buscar_todos_usuarios, exportar_atividades,
 )
-from export_utils import exportar_inativos_para_xlsx
-from email_utils import enviar_relatorio
+from export_utils import preparar_df_saida, exportar_relatorios
+from email_utils import enviar_email, montar_email_relatorio, montar_email_erro
 
-# --- Obter token para extrair dados via API ---
-print("Obtendo token OAuth...")
-token = get_token(OAUTH_TOKEN_URL, CLIENT_ID, CLIENT_SECRET)
+LABEL_RESULTADO = {
+    "desativado": "Desativado",
+    "ja_desativado": "Ja estava desativado",
+    "nao_encontrado": "Nao encontrado",
+    "erro": "Falha",
+}
 
-# --- Extrair usuarios via SCIM API ---
-print("\nExtraindo usuarios via SCIM API...")
-df_users = buscar_todos_usuarios(SAC_SCIM_API_URL, token)
-if COL_IS_DEACTIVATED in df_users.columns:
-    df_users = df_users[df_users[COL_IS_DEACTIVATED].isna() | (df_users[COL_IS_DEACTIVATED] == "")]
 
-# --- Extrair TODAS as atividades via API (para calcular dias sem acesso) ---
-print("\nExtraindo todas as atividades via API...")
-df_atividade_full = exportar_atividades(SAC_ACTIVITIES_URL, token, CSRF_URL)
+def validar_config():
+    faltando = [n for n, v in {
+        "CLIENT_ID": CLIENT_ID, "CLIENT_SECRET": CLIENT_SECRET,
+        "OAUTH_TOKEN_URL": OAUTH_TOKEN_URL, "TENANT_URL": TENANT_URL,
+    }.items() if not v]
+    if faltando:
+        raise RuntimeError(f"Variaveis obrigatorias ausentes no .env: {', '.join(faltando)}")
 
-print("\nColunas de atividade:", df_atividade_full.columns.tolist())
-if COL_OBJECT_TYPE not in df_atividade_full.columns:
-    raise Exception(f"Coluna '{COL_OBJECT_TYPE}' nao encontrada nas atividades! Colunas disponiveis: {df_atividade_full.columns.tolist()}")
-df_atividade_full = df_atividade_full[df_atividade_full[COL_OBJECT_TYPE] == "User"]
 
-# --- Filtrar usuarios ativos nos ultimos 30 dias ---
-data_30_dias = (datetime.now() - timedelta(days=30)).strftime("%Y.%m.%d %H:%M:%S")
-df_atividade_recente = df_atividade_full[df_atividade_full[COL_TIMESTAMP] >= data_30_dias]
+def formatar_data(dt):
+    return "NUNCA ACESSOU" if pd.isna(dt) else dt.strftime("%d/%m/%Y %H:%M")
 
-ultimas_atividades = df_atividade_recente.groupby(COL_USER_ID_ATIVIDADE)[COL_TIMESTAMP].max().reset_index()
-active_user_ids = set(ultimas_atividades[COL_USER_ID_ATIVIDADE].astype(str).unique())
-df_inactive = df_users[~df_users[COL_USER_ID_USERS].astype(str).isin(active_user_ids)]
 
-protegidos = set([u.lower() for u in USERS_PROTEGIDOS])
-def eh_protegido(row):
-    email = str(row.get(COL_USER_EMAIL, "")).lower()
-    user_name = str(row.get(COL_USER_ID_USERS, "")).lower()
-    return (email in protegidos) or (user_name in protegidos)
-df_inactive = df_inactive.copy()
-df_inactive['eh_protegido'] = df_inactive.apply(eh_protegido, axis=1)
-df_inactive_ok = df_inactive[~df_inactive['eh_protegido']]
+def executar():
+    agora = datetime.now()
+    data_corte = agora - timedelta(days=DIAS_INATIVIDADE)
+    data_carencia = agora - timedelta(days=DIAS_CARENCIA_USUARIO_NOVO)
+    print(f"Inicio: {agora:%d/%m/%Y %H:%M:%S} | criterio: sem atividade desde {data_corte:%d/%m/%Y}")
 
-print(f"\nTotal de usuarios ativos no SAC: {len(df_users)}")
-print(f"Usuarios ativos nos ultimos 30 dias: {len(active_user_ids)}")
-print(f"Usuarios inativos ha mais de 30 dias (antes do filtro de protecao): {len(df_inactive)}")
-print(f"Usuarios realmente passiveis de desativacao: {len(df_inactive_ok)}\n")
-print("Inativos (exceto protegidos):")
-print(df_inactive_ok[[COL_USER_ID_USERS, COL_USER_NAME, COL_USER_EMAIL]])
+    validar_config()
 
-# Adicionar ultimo acesso e dias sem acesso ao CSV
-df_atividade_user = df_atividade_full[df_atividade_full[COL_OBJECT_TYPE] == "User"]
-ultimos_acessos_full = (
-    df_atividade_user.groupby(COL_USER_ID_ATIVIDADE)[COL_TIMESTAMP].max()
-    .reset_index()
-    .rename(columns={COL_TIMESTAMP: "ULTIMO_ACESSO"})
-)
-df_inactive_ok = df_inactive_ok.copy()
-df_inactive_ok = df_inactive_ok.merge(
-    ultimos_acessos_full, left_on=COL_USER_ID_USERS, right_on=COL_USER_ID_ATIVIDADE, how="left"
-)
-if COL_USER_ID_ATIVIDADE in df_inactive_ok.columns and COL_USER_ID_ATIVIDADE != COL_USER_ID_USERS:
-    df_inactive_ok.drop(columns=[COL_USER_ID_ATIVIDADE], inplace=True)
+    # --- Token OAuth ---
+    etapa = "autenticacao OAuth"
+    print("\nObtendo token OAuth...")
+    token = get_token(OAUTH_TOKEN_URL, CLIENT_ID, CLIENT_SECRET)
 
-hoje = datetime.now()
-def calcular_dias_csv(dt_str):
-    if pd.isna(dt_str) or dt_str == "":
-        return "NUNCA ACESSOU"
+    # --- Usuarios via SCIM ---
+    etapa = "extracao de usuarios (SCIM)"
+    print("\nExtraindo usuarios via SCIM API...")
+    df_users = buscar_todos_usuarios(SAC_SCIM_API_URL, token)
+    total_contas = len(df_users)
+    if COL_IS_DEACTIVATED in df_users.columns:
+        df_users = df_users[df_users[COL_IS_DEACTIVATED].isna() | (df_users[COL_IS_DEACTIVATED] == "")].copy()
+    print(f"Contas no SAC: {total_contas} | habilitadas: {len(df_users)}")
+
+    # --- Atividades ---
+    etapa = "extracao do log de atividades"
+    print("\nExtraindo atividades via API...")
+    df_atv = exportar_atividades(SAC_ACTIVITIES_URL, token, CSRF_URL)
+    if COL_OBJECT_TYPE not in df_atv.columns or COL_TIMESTAMP not in df_atv.columns:
+        raise RuntimeError(
+            f"Colunas '{COL_OBJECT_TYPE}'/'{COL_TIMESTAMP}' nao encontradas nas atividades. "
+            f"Colunas disponiveis: {df_atv.columns.tolist()}"
+        )
+    df_atv = df_atv[df_atv[COL_OBJECT_TYPE] == "User"].copy()
+    df_atv["_ts"] = pd.to_datetime(
+        df_atv[COL_TIMESTAMP].astype(str).str.strip(), format=FORMATO_TIMESTAMP_ATIVIDADE, errors="coerce"
+    )
+    invalidos = int(df_atv["_ts"].isna().sum())
+    if invalidos:
+        print(f"Aviso: {invalidos} linhas de atividade com timestamp invalido foram ignoradas.")
+    ultimo_acesso = (
+        df_atv.dropna(subset=["_ts"])
+        .assign(_uid=lambda d: d[COL_USER_ID_ATIVIDADE].astype(str).str.strip())
+        .groupby("_uid")["_ts"].max()
+    )
+
+    # --- Classificacao ---
+    etapa = "classificacao dos usuarios"
+    df_users["ULTIMO_ACESSO_DT"] = df_users[COL_USER_ID_USERS].astype(str).str.strip().map(ultimo_acesso)
+    criado_em = pd.to_datetime(df_users[COL_USER_CREATED], errors="coerce", utc=True)
+    df_users["CRIADO_EM_DT"] = criado_em.dt.tz_convert(None)
+
+    protegidos = {u.lower() for u in USERS_PROTEGIDOS}
+    eh_protegido = (
+        df_users[COL_USER_EMAIL].astype(str).str.lower().isin(protegidos)
+        | df_users[COL_USER_ID_USERS].astype(str).str.lower().isin(protegidos)
+    )
+    acesso_recente = df_users["ULTIMO_ACESSO_DT"] >= data_corte          # NaT -> False
+    usuario_novo = df_users["CRIADO_EM_DT"] >= data_carencia            # NaT -> False
+
+    df_users["STATUS"] = "inativo"
+    df_users.loc[eh_protegido & ~acesso_recente, "STATUS"] = "protegido"
+    df_users.loc[usuario_novo & ~acesso_recente & ~eh_protegido, "STATUS"] = "novo"
+    df_users.loc[acesso_recente, "STATUS"] = "ativo"
+
+    df_users["ULTIMO_ACESSO"] = df_users["ULTIMO_ACESSO_DT"].apply(formatar_data)
+    df_users["DIAS_SEM_ACESSO"] = df_users["ULTIMO_ACESSO_DT"].apply(
+        lambda dt: "NUNCA ACESSOU" if pd.isna(dt) else (agora - dt).days
+    )
+
+    df_inativos = df_users[df_users["STATUS"] == "inativo"].copy()
+    df_protegidos = df_users[df_users["STATUS"] == "protegido"].copy()
+    total_ativos = int((df_users["STATUS"] == "ativo").sum())
+    total_novos = int((df_users["STATUS"] == "novo").sum())
+
+    print(f"\nUsuarios habilitados no SAC: {len(df_users)}")
+    print(f"Com acesso nos ultimos {DIAS_INATIVIDADE} dias: {total_ativos}")
+    print(f"Inativos protegidos (nao desativar): {len(df_protegidos)}")
+    print(f"Contas novas em carencia (ignoradas): {total_novos}")
+    print(f"Passiveis de desativacao: {len(df_inativos)}\n")
+    if len(df_inativos):
+        print(df_inativos[[COL_USER_ID_USERS, COL_USER_NAME, COL_USER_EMAIL, "ULTIMO_ACESSO", "DIAS_SEM_ACESSO"]].to_string(index=False))
+    if len(df_protegidos):
+        print("\nProtegidos inativos:")
+        print(df_protegidos[[COL_USER_ID_USERS, COL_USER_NAME, COL_USER_EMAIL, "ULTIMO_ACESSO"]].to_string(index=False))
+
+    # --- Desativacao ---
+    etapa = "desativacao"
+    modo = "desativacao" if DESATIVAR else "relatorio"
+    resultados = {}
+    erro_desativacao = None
+    if DESATIVAR and len(df_inativos) > 0:
+        ids = df_inativos[COL_USER_ID_USERS].astype(str).tolist()
+        if DESATIVAR_APENAS_UM:
+            ids = ids[:1]
+            print("\nMODO TESTE: apenas o primeiro usuario sera desativado.")
+        try:
+            print("\nObtendo CSRF token para desativacao...")
+            csrf_token, cookies = get_csrf_token(CSRF_URL, token)
+            for i, uid in enumerate(ids, 1):
+                status, msg = desativar_usuario(SAC_SCIM_API_URL, token, uid, csrf_token, cookies)
+                resultados[uid] = status
+                print(f"[{i}/{len(ids)}] {uid}: {msg}")
+        except Exception as e:
+            erro_desativacao = f"{type(e).__name__}: {e}"
+            print(f"\nERRO na desativacao: {erro_desativacao}")
+            traceback.print_exc()
+        df_inativos["RESULTADO"] = df_inativos[COL_USER_ID_USERS].astype(str).map(
+            lambda u: LABEL_RESULTADO.get(resultados.get(u), "Nao processado")
+        )
+    elif DESATIVAR:
+        print("\nNenhum usuario a desativar.")
+    else:
+        df_inativos["RESULTADO"] = "Nao desativado (modo relatorio)"
+        print("\nModo relatorio (DESATIVAR = False): nenhum usuario foi desativado.")
+
+    qtd = lambda s: sum(1 for v in resultados.values() if v == s)
+    qtd_desativados, qtd_ja, qtd_falhas = qtd("desativado"), qtd("ja_desativado"), qtd("erro") + qtd("nao_encontrado")
+
+    # --- Relatorios ---
+    etapa = "geracao dos relatorios"
+    df_saida = preparar_df_saida(df_inativos)
+    df_prot_saida = preparar_df_saida(df_protegidos) if len(df_protegidos) else None
+    exportar_relatorios(df_saida, ARQUIVO_SAIDA_CSV, ARQUIVO_SAIDA_XLSX, df_prot_saida)
+
+    # --- Email ---
+    etapa = "envio do email"
+    if EMAIL_DESTINATARIOS:
+        total_users = len(df_users)
+        ctx = {
+            "data_hoje": agora.strftime("%d/%m/%Y"),
+            "hora": agora.strftime("%H:%M"),
+            "data_corte": data_corte.strftime("%d/%m/%Y"),
+            "dias_inatividade": DIAS_INATIVIDADE,
+            "dias_carencia": DIAS_CARENCIA_USUARIO_NOVO,
+            "total_users": total_users,
+            "total_ativos": total_ativos,
+            "total_inativos": len(df_inativos),
+            "total_protegidos": len(df_protegidos),
+            "total_novos": total_novos,
+            "pct_inativos": round(len(df_inativos) / total_users * 100, 1) if total_users else 0,
+            "modo": modo,
+            "apenas_um": bool(DESATIVAR and DESATIVAR_APENAS_UM),
+            "qtd_desativados": qtd_desativados,
+            "qtd_ja_desativados": qtd_ja,
+            "qtd_falhas": qtd_falhas,
+            "erro_desativacao": erro_desativacao,
+            "df_saida": df_saida,
+            "protegidos": df_prot_saida.to_dict("records") if df_prot_saida is not None else [],
+            "anexos": [os.path.basename(ARQUIVO_SAIDA_XLSX), os.path.basename(ARQUIVO_SAIDA_CSV)],
+            "max_linhas_tabela": EMAIL_MAX_LINHAS_TABELA,
+            "host": socket.gethostname(),
+        }
+        assunto, corpo = montar_email_relatorio(ctx)
+        anexos = [ARQUIVO_SAIDA_XLSX, ARQUIVO_SAIDA_CSV]
+        try:
+            enviar_email(EMAIL_SMTP_HOST, EMAIL_SMTP_PORT, EMAIL_FROM, EMAIL_DESTINATARIOS, assunto, corpo, anexos)
+        except Exception as e:
+            print(f"Erro ao enviar email: {e}")
+    else:
+        print("EMAIL_DESTINATARIOS vazio: email nao enviado.")
+
+    print(f"\nFim: {datetime.now():%d/%m/%Y %H:%M:%S}")
+    return erro_desativacao is None and qtd_falhas == 0
+
+
+def main():
     try:
-        dt = datetime.strptime(str(dt_str).strip(), "%Y.%m.%d %H:%M:%S")
-        return (hoje - dt).days
-    except Exception:
-        return "NUNCA ACESSOU"
-
-def formatar_acesso_csv(dt_str):
-    if pd.isna(dt_str) or dt_str == "":
-        return "NUNCA ACESSOU"
-    try:
-        dt = datetime.strptime(str(dt_str).strip(), "%Y.%m.%d %H:%M:%S")
-        return dt.strftime("%d/%m/%Y %H:%M")
-    except Exception:
-        return "NUNCA ACESSOU"
-
-df_inactive_ok["DIAS_SEM_ACESSO"] = df_inactive_ok["ULTIMO_ACESSO"].apply(calcular_dias_csv)
-df_inactive_ok["ULTIMO_ACESSO"] = df_inactive_ok["ULTIMO_ACESSO"].apply(formatar_acesso_csv)
-
-df_inactive_ok.to_csv("usuarios_inativos_para_desativar.csv", index=False)
-print("\nLista salva em usuarios_inativos_para_desativar.csv")
-
-exportar_inativos_para_xlsx(
-    df_inativos=df_inactive_ok,
-    caminho_saida_xlsx="usuarios_inativos_para_desativar.xlsx"
-)
-
-if df_inactive['eh_protegido'].sum() > 0:
-    print("\nUsuarios protegidos (nao serao desativados):")
-    print(df_inactive[df_inactive['eh_protegido']][[COL_USER_ID_USERS, COL_USER_NAME, COL_USER_EMAIL]])
-
-if DESATIVAR and len(df_inactive_ok) > 0:
-    print("\nObtendo CSRF token para desativacao...")
-    csrf_token, cookies = get_csrf_token(CSRF_URL, token)
-    print("Desativando usuarios inativos (exceto protegidos)...")
-    lista_emails = df_inactive_ok[COL_USER_EMAIL].tolist()
-    if DESATIVAR_APENAS_UM:
-        lista_emails = lista_emails[:1]
-    for email in lista_emails:
-        print(f"\nBuscando usuario pelo email: {email}")
-        user = buscar_usuario_por_email(SAC_SCIM_API_URL, token, email)
-        if user:
-            print("Usuario encontrado!")
-            print("userName:", user.get("userName"))
-            print("displayName:", user.get("displayName"))
-            print("emails:", [e.get("value") for e in user.get("emails", [])])
-            print("ID SCIM:", user.get("id"))
-            print("Ativo:", user.get("active"))
-            if user.get("active", True):
-                print(f"Desativando usuario: {user.get('id')} ...")
-                desativar_usuario(SAC_SCIM_API_URL, token, user.get("id"), csrf_token, cookies)
-            else:
-                print("Usuario ja esta desativado.")
-        else:
-            print("Nenhum usuario com esse email encontrado.")
-    print("\nTodos os inativos processados!")
-else:
-    print("\nModo seguro ativado ou nenhum usuario a desativar. Nenhum usuario foi desativado.")
-
-# --- Envio de email com relatorio ---
-if EMAIL_DESTINATARIOS:
-    data_hoje = datetime.now().strftime("%d/%m/%Y")
-    total_users = len(df_users)
-    total_ativos = len(active_user_ids)
-    total_inativos = len(df_inactive_ok)
-    pct_inativos = round((total_inativos / total_users * 100), 1) if total_users > 0 else 0
-    status_desativacao = "Desativacao executada" if DESATIVAR else "Apenas relatorio (modo seguro)"
-
-    assunto = f"[SAC] {total_inativos} usuarios inativos identificados - {data_hoje}"
-    corpo = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-    </head>
-    <body style="margin:0; padding:0; background-color:#f4f6f9; font-family: 'Segoe UI', Arial, sans-serif;">
-        <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f6f9; padding:30px 0;">
-            <tr>
-                <td align="center">
-                    <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:8px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,0.08);">
-
-                        <!-- Header -->
-                        <tr>
-                            <td style="background: linear-gradient(135deg, #0a1628 0%, #1a3a5c 100%); padding:30px 40px; text-align:center;">
-                                <h1 style="color:#ffffff; margin:0; font-size:22px; font-weight:600; letter-spacing:0.5px;">
-                                    SAP Analytics Cloud
-                                </h1>
-                                <p style="color:#7eb8e0; margin:6px 0 0; font-size:14px;">
-                                    Relatorio de Usuarios Inativos
-                                </p>
-                            </td>
-                        </tr>
-
-                        <!-- Data -->
-                        <tr>
-                            <td style="padding:24px 40px 0;">
-                                <p style="color:#6b7280; font-size:13px; margin:0;">
-                                    Gerado em <strong style="color:#374151;">{data_hoje}</strong>
-                                </p>
-                            </td>
-                        </tr>
-
-                        <!-- Cards de metricas -->
-                        <tr>
-                            <td style="padding:20px 40px;">
-                                <table width="100%" cellpadding="0" cellspacing="0">
-                                    <tr>
-                                        <td width="33%" style="padding:0 6px 0 0;">
-                                            <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0fdf4; border-radius:8px; border: 1px solid #bbf7d0;">
-                                                <tr>
-                                                    <td style="padding:16px; text-align:center;">
-                                                        <p style="font-size:28px; font-weight:700; color:#16a34a; margin:0;">{total_users}</p>
-                                                        <p style="font-size:11px; color:#4b5563; margin:6px 0 0; text-transform:uppercase; letter-spacing:0.5px;">Total usuarios</p>
-                                                    </td>
-                                                </tr>
-                                            </table>
-                                        </td>
-                                        <td width="33%" style="padding:0 3px;">
-                                            <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#eff6ff; border-radius:8px; border: 1px solid #bfdbfe;">
-                                                <tr>
-                                                    <td style="padding:16px; text-align:center;">
-                                                        <p style="font-size:28px; font-weight:700; color:#2563eb; margin:0;">{total_ativos}</p>
-                                                        <p style="font-size:11px; color:#4b5563; margin:6px 0 0; text-transform:uppercase; letter-spacing:0.5px;">Ativos (30d)</p>
-                                                    </td>
-                                                </tr>
-                                            </table>
-                                        </td>
-                                        <td width="33%" style="padding:0 0 0 6px;">
-                                            <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#fef2f2; border-radius:8px; border: 1px solid #fecaca;">
-                                                <tr>
-                                                    <td style="padding:16px; text-align:center;">
-                                                        <p style="font-size:28px; font-weight:700; color:#dc2626; margin:0;">{total_inativos}</p>
-                                                        <p style="font-size:11px; color:#4b5563; margin:6px 0 0; text-transform:uppercase; letter-spacing:0.5px;">Inativos</p>
-                                                    </td>
-                                                </tr>
-                                            </table>
-                                        </td>
-                                    </tr>
-                                </table>
-                            </td>
-                        </tr>
-
-                        <!-- Barra de porcentagem -->
-                        <tr>
-                            <td style="padding:0 40px 24px;">
-                                <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f9fafb; border-radius:8px; border:1px solid #e5e7eb;">
-                                    <tr>
-                                        <td style="padding:14px 18px;">
-                                            <p style="font-size:12px; color:#6b7280; margin:0 0 8px; text-transform:uppercase; letter-spacing:0.5px;">Taxa de inatividade</p>
-                                            <table width="100%" cellpadding="0" cellspacing="0">
-                                                <tr>
-                                                    <td style="background-color:#e5e7eb; border-radius:4px; height:8px;">
-                                                        <table width="{pct_inativos}%" cellpadding="0" cellspacing="0">
-                                                            <tr>
-                                                                <td style="background-color:#dc2626; border-radius:4px; height:8px;"></td>
-                                                            </tr>
-                                                        </table>
-                                                    </td>
-                                                    <td width="50" style="text-align:right; padding-left:12px;">
-                                                        <span style="font-size:14px; font-weight:700; color:#374151;">{pct_inativos}%</span>
-                                                    </td>
-                                                </tr>
-                                            </table>
-                                        </td>
-                                    </tr>
-                                </table>
-                            </td>
-                        </tr>
-
-                        <!-- Status -->
-                        <tr>
-                            <td style="padding:0 40px 24px;">
-                                <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#fffbeb; border-radius:8px; border:1px solid #fde68a;">
-                                    <tr>
-                                        <td style="padding:12px 18px;">
-                                            <p style="font-size:13px; color:#92400e; margin:0;">
-                                                <strong>Status:</strong> {status_desativacao}
-                                            </p>
-                                        </td>
-                                    </tr>
-                                </table>
-                            </td>
-                        </tr>
-
-                        <!-- Anexos -->
-                        <tr>
-                            <td style="padding:0 40px 30px;">
-                                <p style="font-size:14px; color:#374151; margin:0 0 8px;">
-                                    <strong>Anexos:</strong>
-                                </p>
-                                <p style="font-size:13px; color:#6b7280; margin:0; line-height:1.8;">
-                                    &#128206; usuarios_inativos_para_desativar.xlsx<br>
-                                    &#128206; usuarios_inativos_para_desativar.csv
-                                </p>
-                            </td>
-                        </tr>
-
-                        <!-- Footer -->
-                        <tr>
-                            <td style="background-color:#f9fafb; padding:16px 40px; border-top:1px solid #e5e7eb; text-align:center;">
-                                <p style="font-size:11px; color:#9ca3af; margin:0;">
-                                    Enviado automaticamente pelo sistema SAC User Automation
-                                </p>
-                            </td>
-                        </tr>
-
-                    </table>
-                </td>
-            </tr>
-        </table>
-    </body>
-    </html>
-    """
-    anexos = [
-        os.path.abspath("usuarios_inativos_para_desativar.xlsx"),
-        os.path.abspath("usuarios_inativos_para_desativar.csv"),
-    ]
-    try:
-        enviar_relatorio(EMAIL_SMTP_HOST, EMAIL_SMTP_PORT, EMAIL_FROM, EMAIL_DESTINATARIOS, assunto, corpo, anexos)
+        ok = executar()
+        return 0 if ok else 2
     except Exception as e:
-        print(f"Erro ao enviar email: {e}")
+        tb = traceback.format_exc()
+        # 'etapa' e atualizada dentro de executar(); recuperamos do frame da excecao
+        etapa = _etapa_do_frame(sys.exc_info()[2]) or "desconhecida"
+        print(f"\nERRO FATAL na etapa '{etapa}': {type(e).__name__}: {e}")
+        print(tb)
+        if EMAIL_DESTINATARIOS and EMAIL_SMTP_HOST:
+            agora = datetime.now()
+            try:
+                assunto, corpo = montar_email_erro(
+                    etapa, f"{type(e).__name__}: {e}", tb, agora.strftime("%d/%m/%Y"), agora.strftime("%H:%M")
+                )
+                enviar_email(EMAIL_SMTP_HOST, EMAIL_SMTP_PORT, EMAIL_FROM, EMAIL_DESTINATARIOS, assunto, corpo)
+            except Exception as e2:
+                print(f"Nao foi possivel enviar o email de erro: {e2}")
+        return 1
+
+
+def _etapa_do_frame(tb):
+    """Recupera a variavel local 'etapa' do frame de executar() na pilha da excecao."""
+    while tb is not None:
+        if tb.tb_frame.f_code.co_name == "executar":
+            return tb.tb_frame.f_locals.get("etapa")
+        tb = tb.tb_next
+    return None
+
+
+if __name__ == "__main__":
+    sys.exit(main())

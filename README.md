@@ -2,7 +2,7 @@
 
 Automacao para identificar, gerar relatorios e desativar usuarios inativos no **SAP Analytics Cloud (SAC)**.
 
-Extrai dados diretamente via API (SCIM + Activity Log), identifica usuarios sem acesso nos ultimos 30 dias, gera relatorios em CSV e Excel, envia por email e opcionalmente desativa os usuarios via API SCIM.
+Extrai dados diretamente via API (SCIM + Activity Log), identifica usuarios sem acesso nos ultimos 30 dias (configuravel em `DIAS_INATIVIDADE`), gera relatorios em CSV e Excel, envia por email um resumo com o resultado de cada usuario e opcionalmente desativa os usuarios via API SCIM. Se a execucao falhar, um email de erro e enviado com o motivo.
 
 ---
 
@@ -67,6 +67,12 @@ DESATIVAR = False        # True = desativa usuarios via API / False = apenas ger
 DESATIVAR_APENAS_UM = False  # True = desativa apenas o primeiro (para teste)
 ```
 
+**Regra de inatividade**:
+```python
+DIAS_INATIVIDADE = 30             # sem atividade ha mais de N dias = inativo
+DIAS_CARENCIA_USUARIO_NOVO = 30   # contas criadas ha menos de N dias nunca sao desativadas
+```
+
 ### 5. Executar
 
 ```bash
@@ -80,14 +86,18 @@ python main.py
 1. **Autentica** no SAC via OAuth (client_credentials)
 2. **Extrai todos os usuarios** via SCIM API (`/api/v1/scim/Users`)
 3. **Extrai o log de atividades** via Activity Export API (`/api/v1/audit/activities/exportActivities`)
-4. **Identifica inativos** — usuarios sem acesso nos ultimos 30 dias
-5. **Aplica protecao** — remove da lista os usuarios definidos em `USERS_PROTEGIDOS`
-6. **Gera relatorios**:
+4. **Classifica cada usuario habilitado**:
+   - `ativo` — teve atividade nos ultimos `DIAS_INATIVIDADE` dias
+   - `protegido` — inativo, mas esta em `USERS_PROTEGIDOS` (nunca desativado)
+   - `novo` — inativo, mas a conta foi criada ha menos de `DIAS_CARENCIA_USUARIO_NOVO` dias (ignorado)
+   - `inativo` — passivel de desativacao
+5. **Desativa usuarios** `inativo` via API SCIM (se `DESATIVAR = True`), registrando o resultado de cada um
+6. **Gera relatorios** na pasta do projeto:
    - `usuarios_inativos_para_desativar.csv`
-   - `usuarios_inativos_para_desativar.xlsx`
-   - Ambos incluem: usuario, nome, email, ultimo acesso, dias sem acesso e empresa
-7. **Envia email** com resumo visual (metricas, taxa de inatividade) e relatorios em anexo
-8. **Desativa usuarios** via API SCIM (se `DESATIVAR = True`)
+   - `usuarios_inativos_para_desativar.xlsx` (aba *Inativos* + aba *Protegidos*)
+   - Colunas: usuario, nome, email, empresa, ultimo acesso, dias sem acesso, licenca e resultado da desativacao
+7. **Envia email** com resumo (frase em linguagem simples, status da execucao, metricas, tabela de usuarios com o resultado, observacoes sobre protegidos/contas novas e explicacao do criterio) e relatorios em anexo
+8. **Em caso de erro fatal**, envia um email de falha indicando a etapa e o erro, e encerra com exit code 1 (exit code 2 = concluiu mas alguma desativacao falhou)
 
 ---
 
@@ -152,13 +162,15 @@ nssm remove SAC_Usuarios_Inativos      # remover servico
 
 **Logs:** o servico grava logs em `service.log` na raiz do projeto (rotacao automatica em 5MB).
 
+**Teste rapido:** `python service.py --agora` executa o `main.py` imediatamente e depois segue agendado.
+
 **Nota para Python embeddable:** Se usar a versao embeddable do Python no servidor, edite o arquivo `python3XX._pth` e adicione o caminho completo do projeto para que os modulos sejam encontrados.
 
 ### Opcao 2: Windows Task Scheduler
 
 Cria uma tarefa agendada que executa o script diretamente. Mais simples, mas depende do usuario estar logado.
 
-1. Clique com botao direito em `agendar_tarefa.bat` > **Executar como administrador**
+1. Clique com botao direito em `agendar_tarefa.bat` > **Executar como administrador** (usa a pasta do projeto e o `python` do PATH automaticamente)
 
 Para verificar ou editar:
 - Abra o **Agendador de Tarefas** (`taskschd.msc`) e procure por `SAC_Usuarios_Inativos`
