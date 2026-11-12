@@ -137,7 +137,15 @@ Todas as configuracoes sensiveis ficam no `.env` (nao versionado no git):
 
 ---
 
-## Agendamento automatico (Windows)
+## Execucao pelo BI Scheduler (atual)
+
+Em producao o script e executado pelo **BI Scheduler** (`prc-schedule`): todo dia as 10h e pelo botao **Executar agora** da tela *Usuarios Inativos SAC* (so admin). A tela mostra cada execucao, a lista de inativos com o resultado da desativacao, os protegidos, as contas novas e o historico de desativados.
+
+- No `config.json` do scheduler: `SAC_AUTOMACAO_PATH` = pasta deste projeto (ex.: `C:\sistemas\SAP-Analytics-Cloud-User-Inactivity-Automation`) e, se o `python` nao estiver no PATH do servico, `SAC_AUTOMACAO_PYTHON` = caminho do `python.exe`.
+- O scheduler define `SAC_RESULTADO_JSON` ao rodar o `main.py`; o script grava ali o resultado (totais + um registro por usuario) e o scheduler guarda no banco. Rodando o `main.py` na mao, sem essa variavel, nada muda.
+- Com o scheduler agendando, **desligue o servico NSSM / a tarefa agendada abaixo**, senao na sexta o script roda duas vezes.
+
+## Agendamento automatico (Windows) — alternativa sem o scheduler
 
 Existem duas opcoes para agendar a execucao toda sexta-feira as 10h:
 
