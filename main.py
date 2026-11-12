@@ -1,3 +1,5 @@
+import json
+import numbers
 import os
 import socket
 import sys
@@ -11,7 +13,7 @@ from sac_utils import (
     get_token, get_csrf_token, desativar_usuario,
     buscar_todos_usuarios, exportar_atividades,
 )
-from export_utils import preparar_df_saida, exportar_relatorios
+from export_utils import preparar_df_saida, exportar_relatorios, empresa_from_email
 from email_utils import enviar_email, montar_email_relatorio, montar_email_erro
 
 LABEL_RESULTADO = {
@@ -35,11 +37,64 @@ def formatar_data(dt):
     return "NUNCA ACESSOU" if pd.isna(dt) else dt.strftime("%d/%m/%Y %H:%M")
 
 
-def executar():
+def _data_iso(dt, sufixo=""):
+    return None if pd.isna(dt) else dt.strftime("%Y-%m-%dT%H:%M:%S") + sufixo
+
+
+def _texto(valor):
+    return "" if pd.isna(valor) else str(valor)
+
+
+def _usuarios_json(df, situacao, resultado_padrao):
+    """Um registro por usuario do DataFrame classificado, para o JSON de resultado."""
+    linhas = []
+    for _, r in df.iterrows():
+        dias = r.get("DIAS_SEM_ACESSO")
+        linhas.append({
+            "usuario": _texto(r.get(COL_USER_ID_USERS)),
+            "nome": _texto(r.get(COL_USER_NAME)),
+            "email": _texto(r.get(COL_USER_EMAIL)),
+            "empresa": empresa_from_email(r.get(COL_USER_EMAIL)),
+            "situacao": situacao,
+            # Horario do log de atividades do SAC, como o script compara (sem fuso)
+            "ultimo_acesso": _data_iso(r.get("ULTIMO_ACESSO_DT")),
+            "dias_sem_acesso": int(dias) if isinstance(dias, numbers.Number) and not pd.isna(dias) else None,
+            # meta.created da SCIM, convertido para UTC em executar()
+            "criado_em": _data_iso(r.get("CRIADO_EM_DT"), "Z"),
+            "resultado": resultado_padrao,
+            "mensagem": None,
+        })
+    return linhas
+
+
+def gravar_resultado_json(resultado):
+    """Grava o resultado para o BI Scheduler (so quando ele define SAC_RESULTADO_JSON)."""
+    if not ARQUIVO_RESULTADO_JSON:
+        return
+    try:
+        temporario = ARQUIVO_RESULTADO_JSON + ".tmp"
+        with open(temporario, "w", encoding="utf-8") as f:
+            json.dump(resultado, f, ensure_ascii=False, default=str)
+        os.replace(temporario, ARQUIVO_RESULTADO_JSON)
+    except Exception as e:
+        print(f"Aviso: nao foi possivel gravar o resultado em JSON: {type(e).__name__}: {e}")
+
+
+def executar(resultado=None):
+    # resultado: dicionario preenchido ao longo da execucao; main() grava em JSON mesmo se der erro no meio
+    if resultado is None:
+        resultado = {}
     agora = datetime.now()
     data_corte = agora - timedelta(days=DIAS_INATIVIDADE)
     data_carencia = agora - timedelta(days=DIAS_CARENCIA_USUARIO_NOVO)
     print(f"Inicio: {agora:%d/%m/%Y %H:%M:%S} | criterio: sem atividade desde {data_corte:%d/%m/%Y}")
+    resultado.update({
+        "modo": "desativacao" if DESATIVAR else "relatorio",
+        "apenas_um": bool(DESATIVAR and DESATIVAR_APENAS_UM),
+        "dias_inatividade": DIAS_INATIVIDADE,
+        "dias_carencia": DIAS_CARENCIA_USUARIO_NOVO,
+        "data_corte": data_corte.strftime("%Y-%m-%d"),
+    })
 
     validar_config()
 
@@ -107,6 +162,19 @@ def executar():
     df_protegidos = df_users[df_users["STATUS"] == "protegido"].copy()
     total_ativos = int((df_users["STATUS"] == "ativo").sum())
     total_novos = int((df_users["STATUS"] == "novo").sum())
+    resultado["totais"] = {
+        "contas": int(total_contas),
+        "habilitados": int(len(df_users)),
+        "ativos": total_ativos,
+        "inativos": int(len(df_inativos)),
+        "protegidos": int(len(df_protegidos)),
+        "novos": total_novos,
+    }
+    resultado["usuarios"] = (
+        _usuarios_json(df_inativos, "inativo", "pendente" if DESATIVAR else "modo_relatorio")
+        + _usuarios_json(df_protegidos, "protegido", None)
+        + _usuarios_json(df_users[df_users["STATUS"] == "novo"], "novo", None)
+    )
 
     print(f"\nUsuarios habilitados no SAC: {len(df_users)}")
     print(f"Com acesso nos ultimos {DIAS_INATIVIDADE} dias: {total_ativos}")
@@ -123,6 +191,7 @@ def executar():
     etapa = "desativacao"
     modo = "desativacao" if DESATIVAR else "relatorio"
     resultados = {}
+    mensagens = {}
     erro_desativacao = None
     if DESATIVAR and len(df_inativos) > 0:
         ids = df_inativos[COL_USER_ID_USERS].astype(str).tolist()
@@ -135,6 +204,7 @@ def executar():
             for i, uid in enumerate(ids, 1):
                 status, msg = desativar_usuario(SAC_SCIM_API_URL, token, uid, csrf_token, cookies)
                 resultados[uid] = status
+                mensagens[uid] = msg
                 print(f"[{i}/{len(ids)}] {uid}: {msg}")
         except Exception as e:
             erro_desativacao = f"{type(e).__name__}: {e}"
@@ -151,6 +221,17 @@ def executar():
 
     qtd = lambda s: sum(1 for v in resultados.values() if v == s)
     qtd_desativados, qtd_ja, qtd_falhas = qtd("desativado"), qtd("ja_desativado"), qtd("erro") + qtd("nao_encontrado")
+    if DESATIVAR:
+        for u in resultado["usuarios"]:
+            if u["situacao"] == "inativo":
+                u["resultado"] = resultados.get(u["usuario"], "nao_processado")
+                u["mensagem"] = mensagens.get(u["usuario"])
+    resultado["totais"].update({
+        "desativados": qtd_desativados,
+        "ja_desativados": qtd_ja,
+        "falhas": qtd_falhas,
+    })
+    resultado["erro_desativacao"] = erro_desativacao
 
     # --- Relatorios ---
     etapa = "geracao dos relatorios"
@@ -190,9 +271,12 @@ def executar():
         anexos = [ARQUIVO_SAIDA_XLSX, ARQUIVO_SAIDA_CSV]
         try:
             enviar_email(EMAIL_SMTP_HOST, EMAIL_SMTP_PORT, EMAIL_FROM, EMAIL_DESTINATARIOS, assunto, corpo, anexos)
+            resultado["email_enviado"] = True
         except Exception as e:
+            resultado["email_enviado"] = False
             print(f"Erro ao enviar email: {e}")
     else:
+        resultado["email_enviado"] = False
         print("EMAIL_DESTINATARIOS vazio: email nao enviado.")
 
     print(f"\nFim: {datetime.now():%d/%m/%Y %H:%M:%S}")
@@ -200,13 +284,16 @@ def executar():
 
 
 def main():
+    resultado = {"versao": 1, "inicio": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"), "erro": None}
     try:
-        ok = executar()
-        return 0 if ok else 2
+        ok = executar(resultado)
+        codigo = 0 if ok else 2
     except Exception as e:
+        codigo = 1
         tb = traceback.format_exc()
         # 'etapa' e atualizada dentro de executar(); recuperamos do frame da excecao
         etapa = _etapa_do_frame(sys.exc_info()[2]) or "desconhecida"
+        resultado["erro"] = {"etapa": etapa, "mensagem": f"{type(e).__name__}: {e}"}
         print(f"\nERRO FATAL na etapa '{etapa}': {type(e).__name__}: {e}")
         print(tb)
         if EMAIL_DESTINATARIOS and EMAIL_SMTP_HOST:
@@ -218,7 +305,10 @@ def main():
                 enviar_email(EMAIL_SMTP_HOST, EMAIL_SMTP_PORT, EMAIL_FROM, EMAIL_DESTINATARIOS, assunto, corpo)
             except Exception as e2:
                 print(f"Nao foi possivel enviar o email de erro: {e2}")
-        return 1
+    resultado["codigo_saida"] = codigo
+    resultado["fim"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    gravar_resultado_json(resultado)
+    return codigo
 
 
 def _etapa_do_frame(tb):

@@ -4,7 +4,11 @@ Este arquivo orienta o Claude Code (claude.ai/code) ao trabalhar com o código d
 
 ## Visao Geral
 
-Automacao para analise e desativacao de usuarios inativos no **SAP Analytics Cloud (SAC)**. Extrai usuarios (SCIM API) e o log de atividades (Activity Export API) direto do tenant, identifica quem esta sem acesso ha mais de `DIAS_INATIVIDADE` dias (padrao 30), gera relatorios (CSV/Excel), envia um email HTML com o resumo e o resultado por usuario e, opcionalmente, desativa via API SCIM. Roda toda sexta as 10h como servico Windows (NSSM) via `service.py`.
+Automacao para analise e desativacao de usuarios inativos no **SAP Analytics Cloud (SAC)**. Extrai usuarios (SCIM API) e o log de atividades (Activity Export API) direto do tenant, identifica quem esta sem acesso ha mais de `DIAS_INATIVIDADE` dias (padrao 30), gera relatorios (CSV/Excel), envia um email HTML com o resumo e o resultado por usuario e, opcionalmente, desativa via API SCIM.
+
+**Quem roda:** o BI Scheduler (`prc-schedule`, `negocio/GerAutomacaoSac.js`) executa o `main.py` todo dia as 10h e pelo botao "Executar agora" da tela "Usuarios Inativos SAC" (admin), e mostra a lista de cada execucao. O `service.py` / NSSM (toda sexta 10h) continua no repo para uso avulso, mas nao deve ficar ligado junto com o scheduler (rodaria duas vezes na sexta).
+
+**Integracao com o scheduler:** quando a variavel `SAC_RESULTADO_JSON` existe, `main()` grava nesse caminho um JSON com o resultado (`modo`, `data_corte`, `totais`, `usuarios[]` com `situacao` inativo/protegido/novo e `resultado` por usuario, `erro` {etapa, mensagem}, `codigo_saida`). Ele e gravado mesmo quando a execucao cai no meio (o dicionario e preenchido ao longo de `executar(resultado)`). Ao mudar esse formato, ajuste `usuariosDoResultado`/`gravarFim` no `GerAutomacaoSac.js`.
 
 ## Como Executar
 

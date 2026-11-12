@@ -40,6 +40,9 @@ FORMATO_TIMESTAMP_ATIVIDADE = "%Y.%m.%d %H:%M:%S"
 ARQUIVO_SAIDA_BASE = "usuarios_inativos_para_desativar"
 ARQUIVO_SAIDA_CSV = os.path.join(BASE_DIR, f"{ARQUIVO_SAIDA_BASE}.csv")
 ARQUIVO_SAIDA_XLSX = os.path.join(BASE_DIR, f"{ARQUIVO_SAIDA_BASE}.xlsx")
+# JSON com o resultado da execucao (totais + um registro por usuario) para o BI Scheduler.
+# O scheduler define SAC_RESULTADO_JSON ao rodar o main.py; sem a variavel, o JSON nao e gravado.
+ARQUIVO_RESULTADO_JSON = os.getenv("SAC_RESULTADO_JSON", "")
 
 # Usuarios (userName ou email) que NUNCA serao desativados
 USERS_PROTEGIDOS = [
